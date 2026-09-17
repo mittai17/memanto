@@ -28,15 +28,33 @@ from memanto.cli.migrate.okf_loader import load_okf_bundle
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from opencode_to_okf import convert
 
-# (question, keywords, expected OKF type of the answering row)
+# (question, keywords, expected OKF type, anchor locating the source record)
 PROBES = [
-    ("Which CSS approach does the storefront use?", ["tailwind"], "learning"),
-    ("Are new npm dependencies allowed?", ["forbids", "approval"], "learning"),
-    ("What caused the checkout totals bug?", ["rounding", "quantize"], "learning"),
-    ("What is the debugging rule?", ["reproduce", "before editing"], "learning"),
-    ("Which package manager is current?", ["yarn"], "decision"),
-    ("Is the npm instruction still valid?", ["superseded"], "decision"),
+    ("Which CSS approach does the storefront use?", ["tailwind"], "learning",
+     "Tailwind transitions"),
+    ("Are new npm dependencies allowed?", ["forbids", "approval"], "learning",
+     "forbids new npm"),
+    ("What caused the checkout totals bug?", ["rounding", "quantize"], "learning",
+     "banker's rounding"),
+    ("What is the debugging rule?", ["reproduce", "before editing"], "learning",
+     "reproduce with the failing test"),
+    ("Which package manager is current?", ["yarn"], "decision",
+     "yarn is now the package manager"),
+    ("Is the npm instruction still valid?", ["superseded"], "decision",
+     "contradiction resolved"),
 ]
+
+
+def _source_parts(export: dict) -> list[tuple[str, str, str]]:
+    """(session_id, message_id, text) for every text part in the export."""
+    parts = []
+    for s in export.get("sessions", []):
+        for m in s.get("messages", []):
+            for p in m.get("parts", []):
+                pdata = p.get("data", {}) or {}
+                if pdata.get("type") == "text":
+                    parts.append((s["id"], m.get("id", ""), pdata.get("text", "")))
+    return parts
 
 
 def main() -> int:
@@ -61,12 +79,26 @@ def main() -> int:
 
     row_texts = [(r.get("type"), f"{r.get('title', '')} {r.get('content', '')}".lower())
                  for r in rows]
-    for question, keywords, want_type in PROBES:
-        hit = any(
-            rtype == want_type and any(k.lower() in text for k in keywords)
-            for rtype, text in row_texts
+    sources = _source_parts(export)
+    for question, keywords, want_type, anchor in PROBES:
+        # Bind the probe to its expected source record: the migrated row must
+        # carry the same (session, message) provenance — a duplicate row of
+        # the right type can no longer mask a dropped expected row.
+        src = next(((sid, mid) for sid, mid, text in sources
+                    if anchor.lower() in text.lower()), (None, None))
+        sid, mid = src
+        hit = (
+            sid is not None
+            and any(
+                rtype == want_type
+                and sid.lower() in text
+                and (not mid or mid.lower() in text)
+                and any(k.lower() in text for k in keywords)
+                for rtype, text in row_texts
+            )
         )
-        print(f"[{'PASS' if hit else 'FAIL'}] {question}  (single {want_type} row, {keywords})")
+        print(f"[{'PASS' if hit else 'FAIL'}] {question}  "
+              f"(single {want_type} row {sid}/{mid}, {keywords})")
         failed += not hit
     print("PARITY OK — zero amnesia" if not failed else f"{failed} PROBE(S) FAILED")
     return 1 if failed else 0

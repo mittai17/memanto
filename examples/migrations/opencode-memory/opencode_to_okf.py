@@ -24,6 +24,9 @@ import argparse
 import json
 import os
 import re
+import shutil
+import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -242,6 +245,40 @@ def convert(export: dict) -> list[dict]:
     return memories
 
 
+def _replace_bundle(staging: Path, out: Path) -> None:
+    """Swap a fully rendered bundle into place (mirrors
+    ``OkfExportService._replace_bundle``): under the exclusive bundle lock,
+    rename the existing bundle to a backup, install staging, restore the
+    backup if installation fails. Falls back to plain replace when memanto
+    itself is not importable (standalone converter use).
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+        from memanto.app.utils.atomic_write import okf_bundle_lock
+    except ImportError:  # standalone use: no lock coordination available
+        if out.exists():
+            shutil.rmtree(out)
+        os.replace(staging, out)
+        return
+
+    with okf_bundle_lock(out, shared=False):
+        backup = None
+        if out.exists():
+            backup = Path(tempfile.mkdtemp(
+                prefix=f".{out.name}.backup-", dir=str(out.parent)))
+            backup.rmdir()
+            out.rename(backup)
+        try:
+            staging.rename(out)
+        except Exception:
+            if backup is not None and backup.exists() and not out.exists():
+                backup.rename(out)
+            raise
+        else:
+            if backup is not None:
+                shutil.rmtree(backup)
+
+
 def write_bundle(memories: list[dict], out: Path) -> list[Path]:
     """Write memories to ``out`` via a staging dir + atomic replace.
 
@@ -271,9 +308,7 @@ def write_bundle(memories: list[dict], out: Path) -> list[Path]:
             f"{len(written)} memories migrated from opencode sessions. "
             "Import with `memanto migrate okf <this-dir>`.\n"
         )
-        if out.exists():
-            shutil.rmtree(out)
-        os.replace(staging, out)
+        _replace_bundle(staging, out)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise

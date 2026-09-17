@@ -6,7 +6,7 @@ sessions, messages and parts to ``opencode_export.json``.
 
 Usage:
     python export_opencode.py [--db PATH] [--out opencode_export.json]
-        [--project PROJECT_ID] [--limit N] [--include-tool-output]
+        [--project PROJECT_ID] [--limit N] [--include-tool-payloads]
 
 By default tool inputs and outputs are REDACTED (replaced with a placeholder)
 because they routinely contain secrets (tokens, file contents, credentials).
