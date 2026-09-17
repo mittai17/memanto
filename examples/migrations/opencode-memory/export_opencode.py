@@ -8,9 +8,10 @@ Usage:
     python export_opencode.py [--db PATH] [--out opencode_export.json]
         [--project PROJECT_ID] [--limit N] [--include-tool-output]
 
-By default tool outputs are truncated to 500 chars to keep the export small
-and to avoid leaking secrets into the bundle. Use --include-tool-output to
-keep full outputs (do this only with data you are willing to publish).
+By default tool inputs and outputs are REDACTED (replaced with a placeholder)
+because they routinely contain secrets (tokens, file contents, credentials).
+Truncation is not redaction. Pass --include-tool-payloads only for data you
+are willing to publish, and never commit such exports.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ def export_sessions(
     *,
     project: str | None = None,
     limit: int = 0,
-    include_tool_output: bool = False,
+    include_tool_payloads: bool = False,
 ) -> dict:
     con = _connect(db)
     q = "SELECT * FROM session"
@@ -72,15 +73,22 @@ def export_sessions(
                     pdata = json.loads(pd.pop("data"))
                 except (TypeError, json.JSONDecodeError):
                     pdata = {}
-                if (
-                    not include_tool_output
-                    and pdata.get("type") == "tool"
-                    and isinstance(pdata.get("state"), dict)
-                ):
+                if pdata.get("type") == "tool" and isinstance(pdata.get("state"), dict):
                     state = dict(pdata["state"])
-                    output = state.get("output")
-                    if isinstance(output, str) and len(output) > TOOL_OUTPUT_TRUNCATE:
-                        state["output"] = output[:TOOL_OUTPUT_TRUNCATE] + "\n…[truncated]"
+                    if include_tool_payloads:
+                        output = state.get("output")
+                        if isinstance(output, str) and len(output) > TOOL_OUTPUT_TRUNCATE:
+                            state["output"] = output[:TOOL_OUTPUT_TRUNCATE] + "\n…[truncated]"
+                            pdata["state"] = state
+                    else:
+                        tool_name = pdata.get("tool", "tool")
+                        state["input"] = f"[redacted: {tool_name} input]"
+                        state["output"] = f"[redacted: {tool_name} output]"
+                        if isinstance(state.get("metadata"), dict):
+                            meta = dict(state["metadata"])
+                            if "preview" in meta:
+                                meta["preview"] = f"[redacted: {tool_name} preview]"
+                            state["metadata"] = meta
                         pdata["state"] = state
                 pd["data"] = pdata
                 parts.append(pd)
@@ -99,14 +107,15 @@ def main() -> None:
     ap.add_argument("--out", default="opencode_export.json")
     ap.add_argument("--project", default=None)
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--include-tool-output", action="store_true")
+    ap.add_argument("--include-tool-payloads", action="store_true",
+                    help="Retain (truncated) tool inputs/outputs. WARNING: may contain secrets.")
     args = ap.parse_args()
 
     data = export_sessions(
         Path(args.db),
         project=args.project,
         limit=args.limit,
-        include_tool_output=args.include_tool_output,
+        include_tool_payloads=args.include_tool_payloads,
     )
     Path(args.out).write_text(json.dumps(data, indent=2, default=str))
     n_msg = sum(len(s["messages"]) for s in data["sessions"])

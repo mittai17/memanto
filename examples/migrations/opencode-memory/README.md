@@ -17,7 +17,9 @@ pip install -r requirements.txt
 # 1. synthetic lived-in store (no real data touched)
 python make_sample_store.py --out opencode_export.json
 
-# ...or export YOUR sessions (read-only, tool outputs truncated):
+# ...or export YOUR sessions (read-only; tool inputs/outputs REDACTED by
+# default — truncation is not redaction, so payloads are dropped unless you
+# explicitly opt in with --include-tool-payloads, which may leak secrets):
 python export_opencode.py --limit 20
 
 # 2. convert to OKF

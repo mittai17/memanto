@@ -4,6 +4,9 @@ title: "Noted \u2014 contradiction resolved: yarn is now the package manager, np
 description: "Assistant conclusion in 'Switch package manager'."
 tags: ["opencode", "assistant-output"]
 timestamp: "2026-09-10T00:26:41+00:00"
+opencode_session_id: "ses_demo003"
+opencode_message_id: "m6"
+opencode_role: "assistant"
 x_memanto:
   source: "opencode"
   provenance: "imported"

@@ -3,7 +3,10 @@
 1. Loads the source export (questions we expect the memory to answer).
 2. Loads the generated OKF bundle with Memanto's own ``load_okf_bundle``.
 3. Maps it with ``mappers.map_okf`` (same code path as ``migrate okf``).
-4. Asserts every probe question is answerable from the migrated rows.
+4. Re-runs the adapter's ``convert`` on the export and asserts the row
+   count matches (no dropped memories).
+5. Asserts every probe question is answerable from a SINGLE migrated row
+   (per-row matching — a combined-corpus match could hide dropped rows).
 
 Usage:
     python check_parity.py [--export opencode_export.json] [--bundle okf-bundle]
@@ -17,18 +20,22 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, "/tmp/memanto")  # run from a memanto checkout
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from memanto.cli.migrate.mappers import map_okf
 from memanto.cli.migrate.okf_loader import load_okf_bundle
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from opencode_to_okf import convert
+
+# (question, keywords, expected OKF type of the answering row)
 PROBES = [
-    ("Which CSS approach does the storefront use?", ["tailwind"]),
-    ("Are new npm dependencies allowed?", ["forbids", "approval", "dependencies"]),
-    ("What caused the checkout totals bug?", ["rounding", "decimal", "quantize"]),
-    ("What is the debugging rule?", ["reproduce", "failing test", "before editing"]),
-    ("Which package manager is current?", ["yarn"]),
-    ("Is npm still correct?", ["superseded", "yarn"]),
+    ("Which CSS approach does the storefront use?", ["tailwind"], "learning"),
+    ("Are new npm dependencies allowed?", ["forbids", "approval"], "learning"),
+    ("What caused the checkout totals bug?", ["rounding", "quantize"], "learning"),
+    ("What is the debugging rule?", ["reproduce", "before editing"], "learning"),
+    ("Which package manager is current?", ["yarn"], "decision"),
+    ("Is the npm instruction still valid?", ["superseded"], "decision"),
 ]
 
 
@@ -41,15 +48,25 @@ def main() -> int:
     export = json.loads(Path(args.export).read_text())
     bundle = load_okf_bundle(args.bundle)
     rows = map_okf(bundle)
-    corpus = " ".join(
-        f"{r.get('title', '')} {r.get('content', '')}" for r in rows
-    ).lower()
+    expected = convert(export)
 
-    print(f"source sessions: {len(export['sessions'])}, migrated rows: {len(rows)}")
+    print(f"source sessions: {len(export['sessions'])}, "
+          f"adapter memories: {len(expected)}, migrated rows: {len(rows)}")
     failed = 0
-    for question, keywords in PROBES:
-        hit = any(k.lower() in corpus for k in keywords)
-        print(f"[{'PASS' if hit else 'FAIL'}] {question}  (need one of {keywords})")
+    if len(rows) != len(expected):
+        print(f"[FAIL] row count {len(rows)} != adapter output {len(expected)}: rows dropped")
+        failed += 1
+    else:
+        print("[PASS] row count matches adapter output — nothing dropped")
+
+    row_texts = [(r.get("type"), f"{r.get('title', '')} {r.get('content', '')}".lower())
+                 for r in rows]
+    for question, keywords, want_type in PROBES:
+        hit = any(
+            rtype == want_type and any(k.lower() in text for k in keywords)
+            for rtype, text in row_texts
+        )
+        print(f"[{'PASS' if hit else 'FAIL'}] {question}  (single {want_type} row, {keywords})")
         failed += not hit
     print("PARITY OK — zero amnesia" if not failed else f"{failed} PROBE(S) FAILED")
     return 1 if failed else 0

@@ -4,6 +4,12 @@ title: "opencode session: Switch package manager"
 description: "Coding session 'Switch package manager' in /home/demo/shop (2 messages, agent=build)."
 tags: ["opencode", "session", "agent:build"]
 timestamp: "2026-09-23T01:26:40+00:00"
+opencode_session_id: "ses_demo003"
+opencode_project_id: "demo-shop"
+opencode_model: "{\"id\":\"demo-model\",\"providerID\":\"demo\"}"
+opencode_tokens_input: 12000
+opencode_tokens_output: 3000
+opencode_cost_usd: 0.02
 x_memanto:
   source: "opencode"
   provenance: "imported"

@@ -12,7 +12,10 @@ Source: opencode SQLite (`session` / `message` / `part`, JSON `data` columns).
 | `tool` part, status error | `observation` | failures are memory too |
 | `step-start` / `step-finish` / `reasoning` | — | folded into the session `context` (tokens/cost), not separate files |
 
-All rows carry `x_memanto: {source: opencode, provenance: imported,
-session_id, message_id?, role?/tool?}` so re-import is lossless and
-auditable. Tool outputs are truncated (500 chars at export, 1200 at convert)
-to keep bundles small and secret-safe.
+All rows carry `x_memanto: {source: opencode, provenance: imported, …}`
+for structured consumers, plus top-level `opencode_*` frontmatter keys
+(session/model/token/cost provenance). The loader preserves unknown keys as
+`extra` and `map_okf` surfaces them in the row footer, so they survive real
+imports. Tool outputs are REDACTED by default at export
+(`--include-tool-payloads` opts back into truncated payloads and may leak
+secrets — never commit such exports).

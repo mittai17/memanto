@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +58,11 @@ def _frontmatter(meta: dict, body: str) -> str:
             lines.append(f"{key}: [{', '.join(json.dumps(str(v)) for v in value)}]")
         else:
             lines.append(f"{key}: {json.dumps(value)}")
+    # Top-level extras: the OKF loader preserves unknown frontmatter keys as
+    # "extra" and map_okf surfaces them in the row footer, so session
+    # metadata survives real imports (x_memanto alone is lossy).
+    for k, v in (meta.get("extra") or {}).items():
+        lines.append(f"{k}: {json.dumps(v, default=str)}")
     if meta.get("x_memanto"):
         lines.append("x_memanto:")
         for k, v in meta["x_memanto"].items():
@@ -64,6 +70,32 @@ def _frontmatter(meta: dict, body: str) -> str:
     lines.append("---")
     lines.append(body.strip() + "\n")
     return "\n".join(lines)
+
+
+def _provenance_extra(*, session_id, project_id=None, message_id=None,
+                      role=None, tool=None, status=None, model=None,
+                      tokens_input=None, tokens_output=None, cost=None) -> dict:
+    """Top-level frontmatter extras (survive import via the loader's extra path)."""
+    extra = {"opencode_session_id": session_id}
+    if project_id is not None:
+        extra["opencode_project_id"] = project_id
+    if message_id is not None:
+        extra["opencode_message_id"] = message_id
+    if role is not None:
+        extra["opencode_role"] = role
+    if tool is not None:
+        extra["opencode_tool"] = tool
+    if status is not None:
+        extra["opencode_tool_status"] = status
+    if model:
+        extra["opencode_model"] = model
+    if tokens_input is not None:
+        extra["opencode_tokens_input"] = tokens_input
+    if tokens_output is not None:
+        extra["opencode_tokens_output"] = tokens_output
+    if cost is not None:
+        extra["opencode_cost_usd"] = cost
+    return extra
 
 
 def convert(export: dict) -> list[dict]:
@@ -88,6 +120,11 @@ def convert(export: dict) -> list[dict]:
                 ),
                 "tags": ["opencode", "session", f"agent:{agent}"],
                 "timestamp": _ts(s.get("time_updated") or s.get("time_created")),
+                "extra": _provenance_extra(
+                    session_id=s["id"], project_id=s.get("project_id"),
+                    model=model, tokens_input=s.get("tokens_input"),
+                    tokens_output=s.get("tokens_output"), cost=s.get("cost"),
+                ),
                 "x_memanto": {
                     "source": "opencode",
                     "provenance": "imported",
@@ -142,6 +179,10 @@ def convert(export: dict) -> list[dict]:
                             "description": desc,
                             "tags": tags,
                             "timestamp": _ts(p.get("time_created")),
+                            "extra": _provenance_extra(
+                                session_id=s["id"], message_id=m.get("id"),
+                                role=role,
+                            ),
                             "x_memanto": {
                                 "source": "opencode",
                                 "provenance": "imported",
@@ -157,17 +198,23 @@ def convert(export: dict) -> list[dict]:
                     tool = pdata.get("tool", "tool")
                     state = pdata.get("state", {}) or {}
                     status = state.get("status", "unknown")
+                    # Only finished calls become durable memories: explicit
+                    # success -> artifact, error -> observation. Anything still
+                    # in flight (pending/running/cancelled/unknown) is skipped
+                    # so we never persist an unfinished call as a success.
+                    if status in ("completed", "success"):
+                        mtype, mdir = "artifact", "artifact"
+                        desc = f"{tool} call in '{title}' ({status})."
+                    elif status == "error":
+                        mtype, mdir = "observation", "observation"
+                        desc = f"Failed {tool} call in '{title}'."
+                    else:
+                        continue
                     cmd = json.dumps(state.get("input", ""), default=str)[:300]
                     output = state.get("output", "")
                     if not isinstance(output, str):
                         output = json.dumps(output, default=str)
                     output = output[:TOOL_TRUNCATE]
-                    if status == "error":
-                        mtype, mdir = "observation", "observation"
-                        desc = f"Failed {tool} call in '{title}'."
-                    else:
-                        mtype, mdir = "artifact", "artifact"
-                        desc = f"{tool} call in '{title}' ({status})."
                     memories.append({
                         "dir": mdir,
                         "meta": {
@@ -176,6 +223,10 @@ def convert(export: dict) -> list[dict]:
                             "description": desc,
                             "tags": ["opencode", "tool-call", f"tool:{tool}", f"status:{status}"],
                             "timestamp": _ts(p.get("time_created")),
+                            "extra": _provenance_extra(
+                                session_id=s["id"], message_id=m.get("id"),
+                                tool=tool, status=status,
+                            ),
                             "x_memanto": {
                                 "source": "opencode",
                                 "provenance": "imported",
@@ -192,23 +243,40 @@ def convert(export: dict) -> list[dict]:
 
 
 def write_bundle(memories: list[dict], out: Path) -> list[Path]:
-    written: list[Path] = []
-    counters: dict[str, int] = {}
+    """Write memories to ``out`` via a staging dir + atomic replace.
+
+    The loader imports every ``*.md`` under ``memories/``, so re-running
+    into an existing bundle must not leave stale files behind.
+    """
+    import shutil
+    import tempfile
+
     for mem in memories:
-        mtype = mem["meta"]["type"]
-        assert mtype in VALID_TYPES, f"invalid OKF type: {mtype}"
-        counters[mem["dir"]] = counters.get(mem["dir"], 0) + 1
-        fname = f"{counters[mem['dir']]:04d}-{_slug(mem['meta']['title'])}.md"
-        dest = out / "memories" / mem["dir"] / fname
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(_frontmatter(mem["meta"], mem["body"]))
-        written.append(dest)
-    index = out / "index.md"
-    index.write_text(
-        "# opencode memory export\n\n"
-        f"{len(written)} memories migrated from opencode sessions. "
-        "Import with `memanto migrate okf <this-dir>`.\n"
-    )
+        assert mem["meta"]["type"] in VALID_TYPES, f"invalid OKF type: {mem['meta']['type']}"
+    staging_parent = out.parent
+    staging_parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=out.name + ".", dir=staging_parent))
+    try:
+        written: list[Path] = []
+        counters: dict[str, int] = {}
+        for mem in memories:
+            counters[mem["dir"]] = counters.get(mem["dir"], 0) + 1
+            fname = f"{counters[mem['dir']]:04d}-{_slug(mem['meta']['title'])}.md"
+            dest = staging / "memories" / mem["dir"] / fname
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(_frontmatter(mem["meta"], mem["body"]))
+            written.append(out / "memories" / mem["dir"] / fname)
+        (staging / "index.md").write_text(
+            "# opencode memory export\n\n"
+            f"{len(written)} memories migrated from opencode sessions. "
+            "Import with `memanto migrate okf <this-dir>`.\n"
+        )
+        if out.exists():
+            shutil.rmtree(out)
+        os.replace(staging, out)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     return written
 
 
